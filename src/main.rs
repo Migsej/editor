@@ -1,7 +1,7 @@
-use std::{fs::File, io::{self, Write}};
+use std::{fs::{self, File}, io::{self, Write}, env};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
-    terminal, cursor, style::{self}, event::{read, Event, KeyCode, KeyEvent}
+    terminal, cursor, style, event::{read, Event, KeyCode, KeyEvent}
 };
 
 #[derive(PartialEq)]
@@ -63,6 +63,7 @@ impl State {
         }
         Ok(())
     }
+
     fn normalmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
         match event.code {
             KeyCode::Char(c) => {
@@ -70,7 +71,6 @@ impl State {
                     'q' => {
                         terminal::disable_raw_mode()?;
                         std::process::exit(0);
-                        //return Err(std::io::Error::new(std::io::ErrorKind::Other, "closing"));
                     },
                     'w' => {
                         let mut file = File::create("foo.txt")?;
@@ -116,14 +116,37 @@ impl State {
 
 
 fn main() -> io::Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    let mut startext = vec![String::new()];
+    if args.len() > 1 {
+        let filename = &args[1];
+        let contents = fs::read_to_string(filename)?;
+        startext = contents.split('\n').map(|x| x.to_string()).collect();
+    }
+
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
     stdout.execute(terminal::Clear(terminal::ClearType::All))?;
     stdout.execute(cursor::MoveTo(0,0))?;
+
     
     let (width, height) = terminal::size()?;
-    let mut state = State { text: vec![String::new()], cursor_viewport_pos: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal };
+    let mut state = State { text: startext, cursor_viewport_pos: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal };
     loop {
+        let cursorstyle = match state.mode {
+            Mode::Normal => cursor::SetCursorStyle::BlinkingBlock,
+            Mode::Insert => cursor::SetCursorStyle::BlinkingBar,
+        };
+
+        stdout.queue(terminal::Clear(terminal::ClearType::All))?
+              .queue(cursor::MoveTo(0,0))?
+              .queue(cursorstyle)?
+              .queue(style::Print(&state.get_viewport()))?
+              .queue(cursor::MoveTo(state.file_posx as u16, state.cursor_viewport_pos))?;
+        stdout.flush()?;
+
+
         match read()? {
             Event::Resize(width, height) => {
                 state.width = width;
@@ -138,11 +161,5 @@ fn main() -> io::Result<()> {
             },
             _ => (),
         }
-        stdout.queue(terminal::Clear(terminal::ClearType::All))?
-              .queue(cursor::MoveTo(0,0))?
-              .queue(if state.mode == Mode::Normal { cursor::SetCursorStyle::BlinkingBlock } else { cursor::SetCursorStyle::BlinkingBar})?
-              .queue(style::Print(&state.get_viewport()))?
-              .queue(cursor::MoveTo(state.file_posx as u16, state.cursor_viewport_pos))?;
-        stdout.flush()?;
     }
 }
