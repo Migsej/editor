@@ -1,10 +1,14 @@
-use std::fs::File;
-use std::io::{self, Write};
+use std::{fs::File, io::{self, Write}};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
-    terminal, cursor, style::{self}, event::{read, Event, KeyCode}
+    terminal, cursor, style::{self}, event::{read, Event, KeyCode, KeyEvent}
 };
 
+#[derive(PartialEq)]
+enum Mode {
+    Normal,
+    Insert,
+}
 
 struct State {
     text: Vec<String>,
@@ -14,7 +18,10 @@ struct State {
 
     height: u16,
     width: u16,
+
+    mode: Mode,
 }
+
 
 impl State {
     fn to_string(&self, sep: &str) -> String {
@@ -29,7 +36,84 @@ impl State {
         let lower = std::cmp::min(self.text.len(), self.file_posy + (self.height - self.cursor_viewport_pos) as usize );
         self.text[upper..lower].join("\r\n")
     }
+
+    fn insertmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
+        match event.code {
+            KeyCode::Char(c) => {
+                self.text[self.file_posy].insert(self.file_posx , c);
+                self.file_posx += 1;
+            },
+            KeyCode::Enter => {
+                let new = self.text[self.file_posy].split_off(self.file_posx);
+                self.text.insert(self.file_posy+1, new);
+                self.file_posx = 0;
+                self.file_posy += 1; 
+                if self.cursor_viewport_pos < self.height-1 {
+                    self.cursor_viewport_pos += 1;
+                }
+            },
+            KeyCode::Backspace => {
+                self.file_posx -= 1;
+                self.text[self.file_posy].remove(self.file_posx);
+            },
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+            },
+            _ => (),
+        }
+        Ok(())
+    }
+    fn normalmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
+        match event.code {
+            KeyCode::Char(c) => {
+                match c {
+                    'q' => {
+                        terminal::disable_raw_mode()?;
+                        std::process::exit(0);
+                        //return Err(std::io::Error::new(std::io::ErrorKind::Other, "closing"));
+                    },
+                    'w' => {
+                        let mut file = File::create("foo.txt")?;
+                        file.write_all(self.to_string("\n").as_bytes())?;
+                    },
+                    'j' => {
+                        if self.file_posy != self.text.len() - 1 {
+                            self.file_posy += 1;
+                            if self.cursor_viewport_pos < self.height-1 {
+                                self.cursor_viewport_pos += 1;
+                            }
+                            self.update_x(self.file_posx);
+                        }
+                    },
+                    'k' => {
+                        if self.file_posy != 0 {
+                            self.file_posy -= 1;
+                            if self.cursor_viewport_pos > 0 {
+                                self.cursor_viewport_pos -= 1;
+                            }
+                            self.update_x(self.file_posx);
+                        }
+                    },
+                    'h' => {
+                        if self.file_posx != 0 {
+                            self.update_x(self.file_posx-1);
+                        }
+                    },
+                    'l' => {
+                        self.update_x(self.file_posx+1);
+                    },
+                    'i' => {
+                        self.mode = Mode::Insert;
+                    },
+                    _ => (),
+                }
+            },
+            _ => (),
+        }
+        Ok(())
+    }
 }
+
 
 fn main() -> io::Result<()> {
     let mut stdout = io::stdout();
@@ -38,7 +122,7 @@ fn main() -> io::Result<()> {
     stdout.execute(cursor::MoveTo(0,0))?;
     
     let (width, height) = terminal::size()?;
-    let mut state = State { text: vec![String::new()], cursor_viewport_pos: 0, file_posx: 0, file_posy: 0,  width, height };
+    let mut state = State { text: vec![String::new()], cursor_viewport_pos: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal };
     loop {
         match read()? {
             Event::Resize(width, height) => {
@@ -46,65 +130,17 @@ fn main() -> io::Result<()> {
                 state.height = height;
             },
             Event::Key(event) => {
-                match event.code {
-                    KeyCode::Char(c) => {
-                        if 'q' == c {
-                            terminal::disable_raw_mode()?;
-                            return Ok(());
-                        }else if 'w' == c {
-                            let mut file = File::create("foo.txt")?;
-                            file.write_all(state.to_string("\n").as_bytes())?;
-                        } else {
-                            state.text[state.file_posy].insert(state.file_posx , c);
-                            state.file_posx += 1;
-                        }
-                    },
-                    KeyCode::Enter => {
-                        let new = state.text[state.file_posy].split_off(state.file_posx);
-                        state.text.insert(state.file_posy+1, new);
-                        state.file_posx = 0;
-                        state.file_posy += 1; 
-                        if state.cursor_viewport_pos < state.height-1 {
-                            state.cursor_viewport_pos += 1;
-                        }
-                    },
-                    KeyCode::Down => {
-                        if state.file_posy != state.text.len() - 1 {
-                            state.file_posy += 1;
-                            if state.cursor_viewport_pos < state.height-1 {
-                                state.cursor_viewport_pos += 1;
-                            }
-                            state.update_x(state.file_posx);
-                        }
-                    },
-                    KeyCode::Up => {
-                        if state.file_posy != 0 {
-                            state.file_posy -= 1;
-                            if state.cursor_viewport_pos > 0 {
-                                state.cursor_viewport_pos -= 1;
-                            }
-                            state.update_x(state.file_posx);
-                        }
-                    },
-                    KeyCode::Left => {
-                        if state.file_posx != 0 {
-                            state.update_x(state.file_posx-1);
-                        }
-                    },
-                    KeyCode::Right => {
-                        state.update_x(state.file_posx+1);
-                    },
-                    KeyCode::Backspace => {
-                        state.file_posx -= 1;
-                        state.text[state.file_posy].remove(state.file_posx);
-                    },
-                    _ => (),
+                if state.mode == Mode::Normal {
+                    state.normalmodeinput(event)?;
+                } else if state.mode == Mode::Insert {
+                    state.insertmodeinput(event)?;
                 }
             },
             _ => (),
         }
         stdout.queue(terminal::Clear(terminal::ClearType::All))?
               .queue(cursor::MoveTo(0,0))?
+              .queue(if state.mode == Mode::Normal { cursor::SetCursorStyle::BlinkingBlock } else { cursor::SetCursorStyle::BlinkingBar})?
               .queue(style::Print(&state.get_viewport()))?
               .queue(cursor::MoveTo(state.file_posx as u16, state.cursor_viewport_pos))?;
         stdout.flush()?;
