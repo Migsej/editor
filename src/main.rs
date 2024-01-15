@@ -1,4 +1,4 @@
-use std::{fs::{self, File}, io::{self, Write}, env};
+use std::{fs::{self, File}, io::{self, Write, Error}, env};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
     terminal, cursor, style, event::{read, Event, KeyCode, KeyEvent}
@@ -31,13 +31,24 @@ struct State {
     width: u16,
 
     mode: Mode,
+
+    filename: Option<String>,
 }
 
 
 impl State  {
     fn new(startext: Vec<String>, width: u16, height: u16) -> State {
-        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new() }
+        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None }
     }
+    fn new_from_file(file: String, width: u16, height: u16) -> io::Result<State> {
+        let contents = fs::read_to_string(&file).or_else(|_| {
+            File::create(&file)?;
+            return Ok::<String, Error>(String::from(""))
+        })?;
+        let startext = contents.split('\n').map(|x| x.to_string()).collect();
+        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file) })
+    }
+
     fn to_string(&self, sep: &str) -> String {
         self.text.join(sep)
     }
@@ -125,8 +136,10 @@ impl State  {
                         std::process::exit(0);
                     },
                     'w' => {
-                        let mut file = File::create("foo.txt")?;
-                        file.write_all(self.to_string("\n").as_bytes())?;
+                        if let Some(filename) = &self.filename {
+                            let mut file = File::create(filename)?;
+                            file.write_all(self.to_string("\n").as_bytes())?;
+                        }
                     },
                     'j' => {
                         if self.file_posy != self.text.len() - 1 {
@@ -164,21 +177,22 @@ impl State  {
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let mut startext = vec![String::new()];
-    if args.len() > 1 {
-        let filename = &args[1];
-        let contents = fs::read_to_string(filename)?;
-        startext = contents.split('\n').map(|x| x.to_string()).collect();
-    }
+    let mut state: State;
 
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
     stdout.execute(terminal::Clear(terminal::ClearType::All))?;
     stdout.execute(cursor::MoveTo(0,0))?;
 
-    
     let (width, height) = terminal::size()?;
-    let mut state = State::new(startext, width, height);
+    if args.len() > 1 {
+        let filename = &args[1];
+        state = State::new_from_file(filename.to_string(), width, height)?;
+    } else {
+        let startext = vec![String::new()];
+        state = State::new(startext, width, height);
+    }
+    
 
     loop {
         let cursorstyle = match state.mode {
