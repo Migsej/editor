@@ -10,11 +10,22 @@ enum Mode {
     Insert,
 }
 
+struct Visualline {
+    line: usize,
+    start: usize,
+    end: usize,
+}
+
+
 struct State {
     text: Vec<String>,
-    cursor_viewport_pos: u16,
+    visualtext: Vec<Visualline>,
+    cursor_posx: u16,
+    cursor_posy: u16,
     file_posx: usize,
     file_posy: usize,
+    old_posx: usize,
+    old_posy: usize,
 
     height: u16,
     width: u16,
@@ -23,18 +34,60 @@ struct State {
 }
 
 
-impl State {
+impl State  {
+    fn new(startext: Vec<String>, width: u16, height: u16) -> State {
+        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new() }
+    }
     fn to_string(&self, sep: &str) -> String {
         self.text.join(sep)
     }
     fn update_x(&mut self, new_x: usize) {
         self.file_posx = std::cmp::max(0, std::cmp::min(self.text[self.file_posy].len(), new_x))
     }
+    fn find_visual_line(&self, line: usize) -> usize {
+        let mut i = line;
+        while self.visualtext[i].line != line {
+            i += 1;
+        }
+        return i;
 
-    fn get_viewport(&self) -> String {
-        let upper = std::cmp::max(0, self.file_posy - self.cursor_viewport_pos as usize);
-        let lower = std::cmp::min(self.text.len(), self.file_posy + (self.height - self.cursor_viewport_pos) as usize );
-        self.text[upper..lower].join("\r\n")
+    }
+    fn get_view_port(&self) -> String {
+        let visualpositiony = self.find_visual_line(self.file_posy);
+        let upper = ((visualpositiony as isize - self.cursor_posy as isize) + self.file_posx as isize / self.width as isize) as usize;
+        let lower = std::cmp::min(self.visualtext.len(), upper + self.height as usize);
+        return self.visualtext[upper..lower]
+            .iter()
+            .map(|x| self.text[x.line][x.start..x.end].to_string())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+    }
+
+    fn update_cursor(&mut self) {
+        let visual_newy = self.find_visual_line(self.file_posy) + self.file_posx / self.width as usize;
+        let visual_oldy = self.find_visual_line(self.old_posy) + self.old_posx / self.width as usize;
+        let new_cursorposy = self.cursor_posy as isize 
+                           + (visual_newy as isize - visual_oldy as isize);
+
+        if new_cursorposy < self.height as isize && new_cursorposy >= 0  {
+            self.cursor_posy = new_cursorposy as u16 ;
+        }
+
+        self.cursor_posx = self.file_posx as u16 % self.width;
+    }
+
+    fn update_visuallines(&mut self) {
+        //TODO: perfomance
+        self.visualtext.clear();
+        for (line_num, line) in self.text.iter().enumerate() {
+            let mut start = 0;
+            let end = line.len();
+            while end - start > self.width as usize {
+                self.visualtext.push(Visualline { line: line_num, start, end: start + self.width as usize });
+                start += self.width as usize;
+            }
+            self.visualtext.push(Visualline { line: line_num, start, end});
+        }
     }
 
     fn insertmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
@@ -48,13 +101,12 @@ impl State {
                 self.text.insert(self.file_posy+1, new);
                 self.file_posx = 0;
                 self.file_posy += 1; 
-                if self.cursor_viewport_pos < self.height-1 {
-                    self.cursor_viewport_pos += 1;
-                }
             },
             KeyCode::Backspace => {
-                self.file_posx -= 1;
-                self.text[self.file_posy].remove(self.file_posx);
+                if self.file_posx != 0 {
+                    self.file_posx -= 1;
+                    self.text[self.file_posy].remove(self.file_posx);
+                }
             },
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -79,18 +131,12 @@ impl State {
                     'j' => {
                         if self.file_posy != self.text.len() - 1 {
                             self.file_posy += 1;
-                            if self.cursor_viewport_pos < self.height-1 {
-                                self.cursor_viewport_pos += 1;
-                            }
                             self.update_x(self.file_posx);
                         }
                     },
                     'k' => {
                         if self.file_posy != 0 {
                             self.file_posy -= 1;
-                            if self.cursor_viewport_pos > 0 {
-                                self.cursor_viewport_pos -= 1;
-                            }
                             self.update_x(self.file_posx);
                         }
                     },
@@ -132,20 +178,27 @@ fn main() -> io::Result<()> {
 
     
     let (width, height) = terminal::size()?;
-    let mut state = State { text: startext, cursor_viewport_pos: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal };
+    let mut state = State::new(startext, width, height);
+
     loop {
         let cursorstyle = match state.mode {
             Mode::Normal => cursor::SetCursorStyle::BlinkingBlock,
             Mode::Insert => cursor::SetCursorStyle::BlinkingBar,
         };
+        
+
+        state.update_visuallines();
+        state.update_cursor();
 
         stdout.queue(terminal::Clear(terminal::ClearType::All))?
               .queue(cursor::MoveTo(0,0))?
               .queue(cursorstyle)?
-              .queue(style::Print(&state.get_viewport()))?
-              .queue(cursor::MoveTo(state.file_posx as u16, state.cursor_viewport_pos))?;
+              .queue(style::Print(&state.get_view_port()))?
+              .queue(cursor::MoveTo(state.cursor_posx, state.cursor_posy))?;
         stdout.flush()?;
 
+        state.old_posx = state.file_posx;
+        state.old_posy = state.file_posy;
 
         match read()? {
             Event::Resize(width, height) => {

@@ -1,3 +1,210 @@
-saljhello mom dhejhlsakjdhlskajhdl
+use std::{fs::{self, File}, io::{self, Write}, env};
+use crossterm::{
+    ExecutableCommand, QueueableCommand,
+    terminal, cursor, style, event::{read, Event, KeyCode, KeyEvent}
+};
 
-aslkdjhsalkjdasldkjashdlkjkjk
+#[derive(PartialEq)]
+enum Mode {
+    Normal,
+    Insert,
+}
+
+struct State {
+    text: Vec<String>,
+    cursor_viewport_posx: u16,
+    cursor_viewport_posy: u16,
+    file_posx: usize,
+    file_posy: usize,
+    old_posx: usize,
+    old_posy: usize,
+
+    height: u16,
+    width: u16,
+    view_port: Vec<String>,
+
+    mode: Mode,
+}
+
+
+impl State  {
+    fn new(startext: Vec<String>, width: u16, height: u16) -> State {
+        State { text: startext, cursor_viewport_posx: 0, cursor_viewport_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, view_port: Vec::new() }
+    }
+    fn to_string(&self, sep: &str) -> String {
+        self.text.join(sep)
+    }
+    fn update_x(&mut self, new_x: usize) {
+        self.file_posx = std::cmp::max(0, std::cmp::min(self.text[self.file_posy].len(), new_x))
+    }
+    
+    fn update_cursor(&mut self) {
+        let new_cursorposy = self.cursor_viewport_posy as isize 
+                           + (self.file_posy as isize - self.old_posy as isize) 
+                           + (self.file_posx as u16 / self.width) as isize ;
+
+        if new_cursorposy < self.height as isize && new_cursorposy >= 0 {
+            self.cursor_viewport_posy = new_cursorposy as u16 ;
+        }
+
+        self.cursor_viewport_posx = self.file_posx as u16 % self.width;
+    }
+
+    fn update_viewport(&mut self){
+        let upper = self.file_posy - self.cursor_viewport_posy as usize;
+        
+        let mut viewport_line_index = 0;
+        let mut line_index = 0;
+        let mut start = 0;
+        while viewport_line_index < self.height as usize { 
+            if self.view_port.len() < viewport_line_index+1 {
+                self.view_port.resize(viewport_line_index+1, String::new())
+            }
+            let curline = &self.text[upper+line_index];
+            if curline.len() as isize - start as isize > self.width as isize {
+                self.view_port[viewport_line_index] = curline[start..start+self.width as usize].to_string();
+                self.view_port.remove(0);
+                start += self.width as usize;
+                //viewport_line_index += 1;
+                if self.view_port.len() < viewport_line_index + 1{
+                    self.view_port.resize(viewport_line_index+1, String::new())
+                }
+            } else {
+                self.view_port[viewport_line_index] = curline[start..].to_string();
+
+                line_index += 1;
+                start = 0;
+                viewport_line_index += 1;
+            }
+        }
+
+        if viewport_line_index < self.view_port.len() {
+            self.view_port.truncate(viewport_line_index);
+        }
+    }
+
+    fn insertmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
+        match event.code {
+            KeyCode::Char(c) => {
+                self.text[self.file_posy].insert(self.file_posx , c);
+                self.file_posx += 1;
+            },
+            KeyCode::Enter => {
+                let new = self.text[self.file_posy].split_off(self.file_posx);
+                self.text.insert(self.file_posy+1, new);
+                self.file_posx = 0;
+                self.file_posy += 1; 
+            },
+            KeyCode::Backspace => {
+                if self.file_posx != 0 {
+                    self.file_posx -= 1;
+                    self.text[self.file_posy].remove(self.file_posx);
+                }
+            },
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+            },
+            _ => (),
+        }
+        Ok(())
+    }
+
+    fn normalmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
+        match event.code {
+            KeyCode::Char(c) => {
+                match c {
+                    'q' => {
+                        terminal::disable_raw_mode()?;
+                        std::process::exit(0);
+                    },
+                    'w' => {
+                        let mut file = File::create("foo.txt")?;
+                        file.write_all(self.to_string("\n").as_bytes())?;
+                    },
+                    'j' => {
+                        if self.file_posy != self.text.len() - 1 {
+                            self.file_posy += 1;
+                            self.update_x(self.file_posx);
+                        }
+                    },
+                    'k' => {
+                        if self.file_posy != 0 {
+                            self.file_posy -= 1;
+                            self.update_x(self.file_posx);
+                        }
+                    },
+                    'h' => {
+                        if self.file_posx != 0 {
+                            self.update_x(self.file_posx-1);
+                        }
+                    },
+                    'l' => {
+                        self.update_x(self.file_posx+1);
+                    },
+                    'i' => {
+                        self.mode = Mode::Insert;
+                    },
+                    _ => (),
+                }
+            },
+            _ => (),
+        }
+        Ok(())
+    }
+}
+
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    let mut startext = vec![String::new()];
+    if args.len() > 1 {
+        let filename = &args[1];
+        let contents = fs::read_to_string(filename)?;
+        startext = contents.split('\n').map(|x| x.to_string()).collect();
+    }
+
+    let mut stdout = io::stdout();
+    terminal::enable_raw_mode()?;
+    stdout.execute(terminal::Clear(terminal::ClearType::All))?;
+    stdout.execute(cursor::MoveTo(0,0))?;
+
+    
+    let (width, height) = terminal::size()?;
+    let mut state = State::new(startext, width, height);
+
+    loop {
+        let cursorstyle = match state.mode {
+            Mode::Normal => cursor::SetCursorStyle::BlinkingBlock,
+            Mode::Insert => cursor::SetCursorStyle::BlinkingBar,
+        };
+        
+        state.update_cursor();
+        state.update_viewport();
+
+        stdout.queue(terminal::Clear(terminal::ClearType::All))?
+              .queue(cursor::MoveTo(0,0))?
+              .queue(cursorstyle)?
+              .queue(style::Print(&state.view_port.join("\r\n")))?
+              .queue(cursor::MoveTo(state.cursor_viewport_posx, state.cursor_viewport_posy))?;
+        stdout.flush()?;
+
+        state.old_posx = state.file_posx;
+        state.old_posy = state.file_posy;
+
+        match read()? {
+            Event::Resize(width, height) => {
+                state.width = width;
+                state.height = height;
+            },
+            Event::Key(event) => {
+                if state.mode == Mode::Normal {
+                    state.normalmodeinput(event)?;
+                } else if state.mode == Mode::Insert {
+                    state.insertmodeinput(event)?;
+                }
+            },
+            _ => (),
+        }
+    }
+}
