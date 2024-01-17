@@ -1,16 +1,17 @@
-use std::{fs::{self, File}, io::{self, Write, Error}, env};
+use std::{fs::{self, File}, io::{self, Write, Error, Stdout}, env};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
-    terminal, cursor, style, event::{read, Event, KeyCode, KeyEvent}
+    terminal, cursor, style, event::{read, Event, KeyCode}
 };
 
 mod config;
-use crate::config::get_keybinds;
+use crate::config::{get_keybinds, get_commands};
 
 #[derive(PartialEq, Clone, Copy)]
 enum Mode {
     Normal,
     Insert,
+    Command,
 }
 
 struct Visualline {
@@ -26,6 +27,10 @@ pub struct Keybind {
     function: fn(&mut State, String) -> io::Result<()>,
 }
 
+pub struct Command {
+    name: &'static str,
+    function: fn(&mut State) -> io::Result<()>,
+}
 
 struct State {
     text: Vec<String>,
@@ -44,12 +49,15 @@ struct State {
 
     filename: Option<String>,
     keybinds: Vec<Keybind>,
+    commands: Vec<Command>,
+
+    prompbuffer: String,
 }
 
 
 impl State  {
     fn new(startext: Vec<String>, width: u16, height: u16) -> State {
-        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, keybinds: crate::get_keybinds()}
+        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new()}
     }
     fn new_from_file(file: String, width: u16, height: u16) -> io::Result<State> {
         let contents = fs::read_to_string(&file).or_else(|_| {
@@ -57,15 +65,17 @@ impl State  {
             return Ok::<String, Error>(String::from(""))
         })?;
         let startext = contents.split('\n').map(|x| x.to_string()).collect();
-        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), keybinds: crate::get_keybinds()})
+        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new()})
     }
 
     fn to_string(&self, sep: &str) -> String {
         self.text.join(sep)
     }
+
     fn update_x(&mut self, new_x: usize) {
         self.file_posx = std::cmp::max(0, std::cmp::min(self.text[self.file_posy].len(), new_x))
     }
+
     fn find_visual_line(&self, line: usize) -> usize {
         let mut i = line;
         while self.visualtext[i].line != line {
@@ -78,11 +88,11 @@ impl State  {
         let visualpositiony = self.find_visual_line(self.file_posy);
         let upper = ((visualpositiony as isize - self.cursor_posy as isize) + self.file_posx as isize / self.width as isize) as usize;
         let lower = std::cmp::min(self.visualtext.len(), upper + self.height as usize);
-        return self.visualtext[upper..lower]
+        let result =  self.visualtext[upper..lower]
             .iter()
             .map(|x| self.text[x.line][x.start..x.end].to_string())
-            .collect::<Vec<_>>()
-            .join("\r\n");
+            .collect::<Vec<_>>();
+        return result.join("\r\n");
     }
 
     fn update_cursor(&mut self) {
@@ -165,7 +175,25 @@ impl State  {
         }
         Ok(())
     }
+    
+    fn draw_command_prompt(&self, stdout: &mut Stdout) -> std::io::Result<()> {
+        if self.mode != Mode::Command {
+            return Ok(())
+        }
 
+        stdout.queue(cursor::MoveTo(0, self.height))?
+              .queue(style::Print(':'))?
+              .queue(style::Print(&self.prompbuffer))?;
+        Ok(())
+    }
+    fn execute_command(&mut self) -> std::io::Result<()> {
+        match self.commands.iter().find(|x| x.name == self.prompbuffer) {
+            Some(command) => {
+                return (command.function)(self);
+            },
+            None => Ok(()),
+        }
+    }
 }
 
 
@@ -193,7 +221,7 @@ fn main() -> io::Result<()> {
     loop {
         let cursorstyle = match state.mode {
             Mode::Normal => cursor::SetCursorStyle::BlinkingBlock,
-            Mode::Insert => cursor::SetCursorStyle::BlinkingBar,
+            Mode::Insert | Mode::Command  => cursor::SetCursorStyle::BlinkingBar,
         };
         
 
@@ -201,14 +229,20 @@ fn main() -> io::Result<()> {
         state.update_cursor();
 
         stdout.queue(terminal::Clear(terminal::ClearType::All))?
-              .queue(cursor::MoveTo(0,0))?
               .queue(cursorstyle)?
-              .queue(style::Print(&state.get_view_port()))?
-              .queue(cursor::MoveTo(state.cursor_posx, state.cursor_posy))?;
+              .queue(cursor::MoveTo(0,0))?
+              .queue(style::Print(&state.get_view_port()))?;
+        state.draw_command_prompt(&mut stdout)?;
+
+        if state.mode != Mode::Command {
+            stdout.queue(cursor::MoveTo(state.cursor_posx, state.cursor_posy))?;
+        }
+
         stdout.flush()?;
 
         state.old_posx = state.file_posx;
         state.old_posy = state.file_posy;
+
         state.execute_keybind(defaultkeybinds.clone())?;
     }
 }
