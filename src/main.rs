@@ -166,7 +166,6 @@ impl State  {
         Ok(())
     }
 
-
 }
 
 
@@ -210,7 +209,6 @@ fn main() -> io::Result<()> {
 
         state.old_posx = state.file_posx;
         state.old_posy = state.file_posy;
-
         state.execute_keybind(defaultkeybinds.clone())?;
     }
 }
