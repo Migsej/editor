@@ -1,5 +1,4 @@
 use crate::{Mode, Command, Keybind, State};
-use crossterm::terminal;
 use std::{fs::File, io::Write};
 
 fn insert_keybinds() -> Vec<Keybind> {
@@ -58,9 +57,9 @@ fn normal_keybinds() -> Vec<Keybind> {
     Keybind {
         mode: Mode::Normal, 
         key: "q", 
-        function: |_, _| {
-            terminal::disable_raw_mode()?;
-            std::process::exit(0);
+        function: |state, _| {
+            state.quit();
+            Ok(())
         }
     },
     Keybind {
@@ -172,9 +171,9 @@ pub fn get_commands() -> Vec<Command> {
     vec![
         Command {
             name: "q",
-            function: |_| {
-                terminal::disable_raw_mode()?;
-                std::process::exit(0);
+            function: |state| {
+                state.quit();
+                Ok(())
             },
         }
     ]

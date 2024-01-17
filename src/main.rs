@@ -1,4 +1,4 @@
-use std::{fs::{self, File}, io::{self, Write, Error, Stdout}, env};
+use std::{fs::{self, File}, io::{self, Write, Error, Stdout}, env, process::Output};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
     terminal, cursor, style, event::{read, Event, KeyCode}
@@ -33,6 +33,8 @@ pub struct Command {
 }
 
 struct State {
+    stdout: Stdout,
+
     text: Vec<String>,
     visualtext: Vec<Visualline>,
     cursor_posx: u16,
@@ -57,7 +59,7 @@ struct State {
 
 impl State  {
     fn new(startext: Vec<String>, width: u16, height: u16) -> State {
-        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new()}
+        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new(), stdout: io::stdout()}
     }
     fn new_from_file(file: String, width: u16, height: u16) -> io::Result<State> {
         let contents = fs::read_to_string(&file).or_else(|_| {
@@ -65,7 +67,7 @@ impl State  {
             return Ok::<String, Error>(String::from(""))
         })?;
         let startext = contents.split('\n').map(|x| x.to_string()).collect();
-        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new()})
+        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new(), stdout: io::stdout()})
     }
 
     fn to_string(&self, sep: &str) -> String {
@@ -88,10 +90,13 @@ impl State  {
         let visualpositiony = self.find_visual_line(self.file_posy);
         let upper = ((visualpositiony as isize - self.cursor_posy as isize) + self.file_posx as isize / self.width as isize) as usize;
         let lower = std::cmp::min(self.visualtext.len(), upper + self.height as usize);
-        let result =  self.visualtext[upper..lower]
+        let mut result =  self.visualtext[upper..lower]
             .iter()
             .map(|x| self.text[x.line][x.start..x.end].to_string())
             .collect::<Vec<_>>();
+        if self.mode == Mode::Command {
+            result.truncate(self.height as usize -1);
+        }
         return result.join("\r\n");
     }
 
@@ -176,12 +181,12 @@ impl State  {
         Ok(())
     }
     
-    fn draw_command_prompt(&self, stdout: &mut Stdout) -> std::io::Result<()> {
+    fn draw_command_prompt(&mut self) -> std::io::Result<()> {
         if self.mode != Mode::Command {
             return Ok(())
         }
 
-        stdout.queue(cursor::MoveTo(0, self.height))?
+        self.stdout.queue(cursor::MoveTo(0, self.height))?
               .queue(style::Print(':'))?
               .queue(style::Print(&self.prompbuffer))?;
         Ok(())
@@ -194,6 +199,13 @@ impl State  {
             None => Ok(()),
         }
     }
+
+    fn quit(&mut self) {
+        self.stdout.execute(cursor::SetCursorStyle::BlinkingBlock).unwrap();
+        self.stdout.execute(terminal::LeaveAlternateScreen).unwrap();
+        terminal::disable_raw_mode().unwrap();
+        std::process::exit(0);
+    }
 }
 
 
@@ -201,11 +213,6 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     let mut state: State;
-
-    let mut stdout = io::stdout();
-    terminal::enable_raw_mode()?;
-    stdout.execute(terminal::Clear(terminal::ClearType::All))?;
-    stdout.execute(cursor::MoveTo(0,0))?;
 
     let (width, height) = terminal::size()?;
     if args.len() > 1 {
@@ -215,6 +222,10 @@ fn main() -> io::Result<()> {
         let startext = vec![String::new()];
         state = State::new(startext, width, height);
     }
+    state.stdout.execute(terminal::EnterAlternateScreen)?;
+    terminal::enable_raw_mode()?;
+    state.stdout.execute(terminal::Clear(terminal::ClearType::All))?;
+    state.stdout.execute(cursor::MoveTo(0,0))?;
     
     let defaultkeybinds: Vec<_> = state.keybinds.clone().into_iter().map(|x| (x, String::new())).collect();
 
@@ -228,17 +239,18 @@ fn main() -> io::Result<()> {
         state.update_visuallines();
         state.update_cursor();
 
-        stdout.queue(terminal::Clear(terminal::ClearType::All))?
+        state.stdout.queue(terminal::Clear(terminal::ClearType::All))?
               .queue(cursorstyle)?
-              .queue(cursor::MoveTo(0,0))?
-              .queue(style::Print(&state.get_view_port()))?;
-        state.draw_command_prompt(&mut stdout)?;
+              .queue(cursor::MoveTo(0,0))?;
+
+        state.stdout.queue(style::Print(state.get_view_port()))?;
+        state.draw_command_prompt()?;
 
         if state.mode != Mode::Command {
-            stdout.queue(cursor::MoveTo(state.cursor_posx, state.cursor_posy))?;
+            state.stdout.queue(cursor::MoveTo(state.cursor_posx, state.cursor_posy))?;
         }
 
-        stdout.flush()?;
+        state.stdout.flush()?;
 
         state.old_posx = state.file_posx;
         state.old_posy = state.file_posy;
