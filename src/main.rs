@@ -4,7 +4,10 @@ use crossterm::{
     terminal, cursor, style, event::{read, Event, KeyCode, KeyEvent}
 };
 
-#[derive(PartialEq)]
+mod config;
+use crate::config::get_keybinds;
+
+#[derive(PartialEq, Clone, Copy)]
 enum Mode {
     Normal,
     Insert,
@@ -14,6 +17,13 @@ struct Visualline {
     line: usize,
     start: usize,
     end: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct Keybind {
+    mode: Mode,
+    key: &'static str,
+    function: fn(&mut State, String) -> io::Result<()>,
 }
 
 
@@ -33,12 +43,13 @@ struct State {
     mode: Mode,
 
     filename: Option<String>,
+    keybinds: Vec<Keybind>,
 }
 
 
 impl State  {
     fn new(startext: Vec<String>, width: u16, height: u16) -> State {
-        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None }
+        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, keybinds: crate::get_keybinds()}
     }
     fn new_from_file(file: String, width: u16, height: u16) -> io::Result<State> {
         let contents = fs::read_to_string(&file).or_else(|_| {
@@ -46,7 +57,7 @@ impl State  {
             return Ok::<String, Error>(String::from(""))
         })?;
         let startext = contents.split('\n').map(|x| x.to_string()).collect();
-        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file) })
+        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), keybinds: crate::get_keybinds()})
     }
 
     fn to_string(&self, sep: &str) -> String {
@@ -100,77 +111,62 @@ impl State  {
             self.visualtext.push(Visualline { line: line_num, start, end});
         }
     }
-
-    fn insertmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
-        match event.code {
-            KeyCode::Char(c) => {
-                self.text[self.file_posy].insert(self.file_posx , c);
-                self.file_posx += 1;
+    fn execute_keybind(&mut self, keybinds: Vec<(Keybind, String)>) -> io::Result<()> {
+        match read()? {
+            Event::Resize(width, height) => {
+                self.width = width;
+                self.height = height;
             },
-            KeyCode::Enter => {
-                let new = self.text[self.file_posy].split_off(self.file_posx);
-                self.text.insert(self.file_posy+1, new);
-                self.file_posx = 0;
-                self.file_posy += 1; 
-            },
-            KeyCode::Backspace => {
-                if self.file_posx != 0 {
-                    self.file_posx -= 1;
-                    self.text[self.file_posy].remove(self.file_posx);
+            Event::Key(event) => {
+                let mut key: String = String::new();
+                if let KeyCode::Char(c) = event.code {
+                    key.push(c)
+                } else {
+                    key.push_str(match event.code {
+                        KeyCode::Char(_) => unreachable!(),
+                        KeyCode::Enter => "<cr>",
+                        KeyCode::Backspace => "<back>",
+                        KeyCode::Esc => "<esc>",
+                        _ => "",
+                    });
                 }
-            },
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                let filtered: Vec<(Keybind, String, &str)> = keybinds
+                    .into_iter()
+                    .filter_map(|(mut keybind, mut pressed)| {
+                        let first_keybind = keybind.key;
+                        if keybind.key.starts_with(&key) &&  keybind.mode == self.mode {
+                            keybind.key = &keybind.key[key.len()..];
+                            //pressed.push_str(&key); // might be useful
+                            Some((keybind.clone(), pressed, first_keybind))
+                        } else if keybind.key.starts_with("<any>") &&  keybind.mode == self.mode {
+                            keybind.key = &keybind.key["<any>".len()..];
+                            pressed.push_str(&key);
+                            return Some((keybind.clone(), pressed, first_keybind));
+                        } else {
+                            return None
+                        }
+                    }).collect();
+                let length = filtered.len();
+                if length == 0 {
+                    return Ok(())
+                }
+                let notany: Vec<_> = filtered.iter().filter(|x| x.2 != "<any>").collect();
+                if  notany.len() == 1 {
+                    let head = &notany[0];
+                    return (head.0.function)(self, head.1.to_string());
+                }
+                if length == 1 {
+                    let head = &filtered[0];
+                    return (head.0.function)(self, head.1.to_string());
+                }
+                return self.execute_keybind(filtered.into_iter().map(|(keybind, pressed, _)| (keybind, pressed)).collect());
             },
             _ => (),
         }
         Ok(())
     }
 
-    fn normalmodeinput(&mut self, event: KeyEvent) -> io::Result<()> {
-        match event.code {
-            KeyCode::Char(c) => {
-                match c {
-                    'q' => {
-                        terminal::disable_raw_mode()?;
-                        std::process::exit(0);
-                    },
-                    'w' => {
-                        if let Some(filename) = &self.filename {
-                            let mut file = File::create(filename)?;
-                            file.write_all(self.to_string("\n").as_bytes())?;
-                        }
-                    },
-                    'j' => {
-                        if self.file_posy != self.text.len() - 1 {
-                            self.file_posy += 1;
-                            self.update_x(self.file_posx);
-                        }
-                    },
-                    'k' => {
-                        if self.file_posy != 0 {
-                            self.file_posy -= 1;
-                            self.update_x(self.file_posx);
-                        }
-                    },
-                    'h' => {
-                        if self.file_posx != 0 {
-                            self.update_x(self.file_posx-1);
-                        }
-                    },
-                    'l' => {
-                        self.update_x(self.file_posx+1);
-                    },
-                    'i' => {
-                        self.mode = Mode::Insert;
-                    },
-                    _ => (),
-                }
-            },
-            _ => (),
-        }
-        Ok(())
-    }
+
 }
 
 
@@ -193,6 +189,7 @@ fn main() -> io::Result<()> {
         state = State::new(startext, width, height);
     }
     
+    let defaultkeybinds: Vec<_> = state.keybinds.clone().into_iter().map(|x| (x, String::new())).collect();
 
     loop {
         let cursorstyle = match state.mode {
@@ -214,19 +211,6 @@ fn main() -> io::Result<()> {
         state.old_posx = state.file_posx;
         state.old_posy = state.file_posy;
 
-        match read()? {
-            Event::Resize(width, height) => {
-                state.width = width;
-                state.height = height;
-            },
-            Event::Key(event) => {
-                if state.mode == Mode::Normal {
-                    state.normalmodeinput(event)?;
-                } else if state.mode == Mode::Insert {
-                    state.insertmodeinput(event)?;
-                }
-            },
-            _ => (),
-        }
+        state.execute_keybind(defaultkeybinds.clone())?;
     }
 }
