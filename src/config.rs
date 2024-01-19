@@ -121,6 +121,14 @@ fn normal_keybinds() -> Vec<Keybind> {
             Ok(())
         },
     },
+    Keybind {
+        mode: Mode::Normal,
+        key: "r<any>",
+        function: |state, c| {
+            state.text[state.file_posy].replace_range(state.file_posx..state.file_posx+1, &c[1..2]);
+            Ok(())
+        },
+    },
     ]
 }
 

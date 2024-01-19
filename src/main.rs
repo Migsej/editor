@@ -1,4 +1,4 @@
-use std::{fs::{self, File}, io::{self, Write, Error, Stdout}, env, process::Output};
+use std::{fs::{self, File}, io::{self, Write, Error, Stdout}, env};
 use crossterm::{
     ExecutableCommand, QueueableCommand,
     terminal, cursor, style, event::{read, Event, KeyCode}
@@ -31,12 +31,19 @@ pub struct Command {
     name: &'static str,
     function: fn(&mut State) -> io::Result<()>,
 }
+struct Patch {
+    c: char,
+    color: style::Color,
+}
 
 struct State {
     stdout: Stdout,
 
     text: Vec<String>,
     visualtext: Vec<Visualline>,
+    viewport: Vec<Vec<Patch>>,
+    oldport: Vec<Vec<Patch>>,
+
     cursor_posx: u16,
     cursor_posy: u16,
     file_posx: usize,
@@ -56,10 +63,9 @@ struct State {
     prompbuffer: String,
 }
 
-
 impl State  {
     fn new(startext: Vec<String>, width: u16, height: u16) -> State {
-        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new(), stdout: io::stdout()}
+        State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: None, commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new(), stdout: io::stdout(), oldport: Vec::new(), viewport: Vec::new()}
     }
     fn new_from_file(file: String, width: u16, height: u16) -> io::Result<State> {
         let contents = fs::read_to_string(&file).or_else(|_| {
@@ -67,7 +73,7 @@ impl State  {
             return Ok::<String, Error>(String::from(""))
         })?;
         let startext = contents.split('\n').map(|x| x.to_string()).collect();
-        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new(), stdout: io::stdout()})
+        Ok( State { text: startext, cursor_posx: 0, cursor_posy: 0, old_posx: 0, old_posy: 0, file_posx: 0, file_posy: 0,  width, height, mode: Mode::Normal, visualtext: Vec::new(), filename: Some(file), commands: crate::get_commands(), keybinds: crate::get_keybinds(), prompbuffer: String::new(), stdout: io::stdout(), oldport: Vec::new(), viewport: Vec::new()})
     }
 
     fn to_string(&self, sep: &str) -> String {
@@ -147,14 +153,12 @@ impl State  {
                 }
                 let filtered: Vec<(Keybind, String, &str)> = keybinds
                     .into_iter()
-                    .filter_map(|(mut keybind, mut pressed)| {
+                    .filter_map(|(keybind, mut pressed)| {
                         let first_keybind = keybind.key;
-                        if keybind.key.starts_with(&key) &&  keybind.mode == self.mode {
-                            keybind.key = &keybind.key[key.len()..];
-                            //pressed.push_str(&key); // might be useful
+                        if keybind.key[pressed.len()..].starts_with(&key) &&  keybind.mode == self.mode {
+                            pressed.push_str(&key); // might be useful
                             Some((keybind.clone(), pressed, first_keybind))
-                        } else if keybind.key.starts_with("<any>") &&  keybind.mode == self.mode {
-                            keybind.key = &keybind.key["<any>".len()..];
+                        } else if keybind.key[pressed.len()..].starts_with("<any") &&  keybind.mode == self.mode {
                             pressed.push_str(&key);
                             return Some((keybind.clone(), pressed, first_keybind));
                         } else {
@@ -165,14 +169,18 @@ impl State  {
                 if length == 0 {
                     return Ok(())
                 }
-                let notany: Vec<_> = filtered.iter().filter(|x| x.2 != "<any>").collect();
+                let notany: Vec<_> = filtered.iter().filter(|x| !x.0.key.ends_with("<any>")).collect();
                 if  notany.len() == 1 {
                     let head = &notany[0];
-                    return (head.0.function)(self, head.1.to_string());
+                    if length_of_keybind(head.0.key) == length_of_keybind(&head.1){
+                        return (head.0.function)(self, head.1.to_string());
+                    }
                 }
                 if length == 1 {
                     let head = &filtered[0];
-                    return (head.0.function)(self, head.1.to_string());
+                    if length_of_keybind(head.0.key) == length_of_keybind(&head.1){
+                        return (head.0.function)(self, head.1.to_string());
+                    }
                 }
                 return self.execute_keybind(filtered.into_iter().map(|(keybind, pressed, _)| (keybind, pressed)).collect());
             },
@@ -206,10 +214,31 @@ impl State  {
         terminal::disable_raw_mode().unwrap();
         std::process::exit(0);
     }
+
+    fn write_to_viewport
+}
+
+fn length_of_keybind(key: &str) -> usize {
+    let mut countup = true;
+    let mut result = 0;
+    for c in key.chars() {
+         if c == '<' {
+             countup = false;
+         } else if c == '>' {
+             result += 1;
+             countup = true;
+         } else {
+             if countup {
+                 result += 1;
+             }
+         }
+    }
+    result
 }
 
 
 fn main() -> io::Result<()> {
+    
     let args: Vec<String> = env::args().collect();
 
     let mut state: State;
